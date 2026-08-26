@@ -11,3 +11,4 @@
 - /plan-html — plans are delivered as collapsible HTML, not walls of text.
 - /codex — independent second opinion (review / challenge / consult).
 - /unslop — cut AI tells from any writing; always use this on written output.
+- /pr-image — attach an image to a PR body via GitHub's user-attachments endpoint.
