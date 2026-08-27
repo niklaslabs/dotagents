@@ -9,6 +9,7 @@
 ## Skills
 - /delegate — orchestrate via subagents; model selection matrix (Claude + Codex tiers); staying in control of a running fleet.
 - /ship — my shipping pipeline: lint+format → tests → codex review → commit → PR → auto-merge.
+- /ship-local — same gates as /ship, but merge into main locally and push main (no PR; for small projects without CI).
 - /plan-html — plans are delivered as collapsible HTML, not walls of text.
 - /codex — independent second opinion (review / challenge / consult).
 - /unslop — cut AI tells from any writing; always use this on written output.
