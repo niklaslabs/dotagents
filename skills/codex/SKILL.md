@@ -62,8 +62,10 @@ Otherwise use the per-mode defaults: Review `high`, Challenge `high`, Consult
 `medium`. (`xhigh` uses ~20x more tokens than `high` and can hang for 50+ minutes
 on large-context tasks — only on explicit request.)
 
-**Model:** no model is hardcoded — codex uses its current default (the frontier
-agentic coding model). If the user passes `-m <model>`, forward the flag to codex.
+**Model:** every invocation pins `-c 'model="gpt-5.6-sol"'` (the frontier
+agentic coding model) so results don't depend on `~/.codex/config.toml`. If the
+user passes `-m <model>`, replace that value — always via `-c model="..."`, since
+`codex review` has no `-m` flag (only `codex exec` does).
 
 ## Filesystem boundary
 
@@ -186,7 +188,7 @@ together — put the diff scope in the prompt instead of passing `--base`.
 cd "$(git rev-parse --show-toplevel)"
 _codex_timeout 1200 codex review "<filesystem boundary>
 
-Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review only those changes." -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null >"$TMPOUT" 2>"$TMPERR" &
+Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review only those changes." -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null >"$TMPOUT" 2>"$TMPERR" &
 echo $! > "$TMPOUT.pid"; wait $!; _CODEX_EXIT=$?; echo "EXIT:$_CODEX_EXIT" > "$TMPOUT.exit"
 ```
 
@@ -206,7 +208,7 @@ _PROMPT_FILE=$(mktemp -t codex-prompt)
   git diff "origin/<base>...HEAD" 2>/dev/null || git diff "<base>...HEAD"
   printf '\nDIFF_END\n'
 } > "$_PROMPT_FILE"
-_codex_timeout 1200 codex exec -s read-only "$(cat "$_PROMPT_FILE")" -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null >"$TMPOUT" 2>"$TMPERR" &
+_codex_timeout 1200 codex exec -s read-only "$(cat "$_PROMPT_FILE")" -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null >"$TMPOUT" 2>"$TMPERR" &
 echo $! > "$TMPOUT.pid"; wait $!; _CODEX_EXIT=$?; echo "EXIT:$_CODEX_EXIT" > "$TMPOUT.exit"
 rm -f "$_PROMPT_FILE"
 ```
@@ -280,7 +282,7 @@ failure modes a normal review misses.
 ```bash
 _REPO_ROOT=$(git rev-parse --show-toplevel)
 PYTHON_CMD=$(command -v python3 || command -v python)
-_codex_timeout 1200 codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' --enable web_search_cached --json < /dev/null 2>"$TMPERR" | PYTHONUNBUFFERED=1 "$PYTHON_CMD" -u -c "
+_codex_timeout 1200 codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="high"' --enable web_search_cached --json < /dev/null 2>"$TMPERR" | PYTHONUNBUFFERED=1 "$PYTHON_CMD" -u -c "
 import sys, json
 turns = 0
 for line in sys.stdin:
@@ -363,13 +365,13 @@ Ask Codex anything about the codebase, with session continuity for follow-ups.
    New session:
 
    ```bash
-   _codex_timeout 1200 codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="medium"' --enable web_search_cached --json < /dev/null 2>"$TMPERR" | ... >"$TMPOUT"
+   _codex_timeout 1200 codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="medium"' --enable web_search_cached --json < /dev/null 2>"$TMPERR" | ... >"$TMPOUT"
    ```
 
    Resumed session:
 
    ```bash
-   _codex_timeout 1200 codex exec resume <session-id> "<prompt>" -c 'sandbox_mode="read-only"' -c 'model_reasoning_effort="medium"' --enable web_search_cached --json < /dev/null 2>"$TMPERR" | ... >"$TMPOUT"
+   _codex_timeout 1200 codex exec resume <session-id> "<prompt>" -c 'sandbox_mode="read-only"' -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="medium"' --enable web_search_cached --json < /dev/null 2>"$TMPERR" | ... >"$TMPOUT"
    ```
 
    If resume fails, delete the session file and start fresh.
