@@ -15,6 +15,13 @@ description: Orchestrate work via subagents and pick the right model tier. Use w
 - Post a status update every 2–3 minutes while agents run.
 - Thinking level medium everywhere unless clearly needed.
 
+## Staying in control
+- Every brief tells the subagent to send the orchestrator a 1–3 line progress message every 2–3 minutes (SendMessage to the parent; done/blocked/next). This is how you catch drift early and redirect — waiting for the final report is too late.
+- Keep a written next-step list (what's running, what each result unblocks, what's still pending). Update it whenever an agent starts or finishes. This is the pipeline; the transcript is not.
+- Every agent notification — progress or completion — is a trigger, not news. On each one: (1) read the result, (2) check the next-step list for anything it unblocks, (3) launch it, (4) redirect the agent if it's drifting. Only then acknowledge.
+- If no subagents are running and the task isn't done, you are the bottleneck. Launch the next step or finish it yourself. Never end a turn on "waiting" when nothing is left to wait for.
+- Failure mode to watch for: after a long run of acknowledge-and-wait turns, the completion that actually unblocks the next step gets pattern-matched as another status ping. The next-step list is the guard — consult it before replying, every time.
+
 ## Claude tiers
 | Model | Use for | Not for |
 |---|---|---|
