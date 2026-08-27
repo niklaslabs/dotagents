@@ -91,6 +91,7 @@ Shared setup for every mode:
 _codex_timeout() { local t=$1; shift; if command -v timeout >/dev/null 2>&1; then timeout "$t" "$@"; elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$t" "$@"; else "$@"; fi; }
 TMPOUT=$(mktemp -t codex-out)
 TMPERR=$(mktemp -t codex-err)
+echo "$TMPOUT" >> "${TMPDIR:-/tmp}/codex-skill-runs-$PPID.list"   # this session's runs (see "One run at a time")
 ```
 
 ## Run in the background — never kill a working codex
@@ -103,17 +104,56 @@ restarted from scratch — restarts throw away minutes of work. Always:
   are too tight for large diffs.
 - Launch the Bash call with `run_in_background: true`. The command keeps running
   across turns and you are re-invoked when it exits — no foreground cap applies.
-  Write the exit code to a marker file so completion is unambiguous:
+  Background the codex process inside the call so its PID is recorded, then
+  `wait` on it and write the exit code to a marker file so completion is
+  unambiguous:
   ```bash
-  ... >"$TMPOUT" 2>"$TMPERR"; echo "EXIT:$?" > "$TMPOUT.exit"
+  _codex_timeout 1200 codex ... < /dev/null >"$TMPOUT" 2>"$TMPERR" &
+  echo $! > "$TMPOUT.pid"; wait $!; echo "EXIT:$?" > "$TMPOUT.exit"
   ```
-- While waiting, check in occasionally (roughly once a minute) so the user can
-  see it's alive: `wc -c "$TMPOUT" "$TMPERR"` — growing stderr/JSONL means codex
-  is working. Report a one-line status ("codex still reviewing, output growing").
-  Do not busy-poll faster than that, and never restart a run whose output is
-  still growing.
-- Only if the output files have not grown for 10+ minutes AND no exit marker
-  exists, treat it as stalled: kill it, then retry once.
+  (For the JSONL-piped modes, background the whole pipeline as a group that
+  ends with `exit "${PIPESTATUS[0]}"` so `wait` returns codex's status, not the
+  parser's: `{ codex ... | parser >"$TMPOUT"; exit "${PIPESTATUS[0]}"; } &`.)
+- While waiting, track the run through its process and output file — never wait
+  blind. Roughly once a minute, run the status check below and report one line
+  ("codex still reviewing, output growing"). Do not busy-poll faster than that,
+  and never restart a run whose output is still growing.
+  ```bash
+  [ -f "$TMPOUT.exit" ] && cat "$TMPOUT.exit" || { kill -0 "$(cat "$TMPOUT.pid")" 2>/dev/null && echo RUNNING || echo GONE; }
+  wc -c "$TMPOUT" "$TMPERR"
+  ```
+  `GONE` with no exit marker means the process died without writing one (e.g.
+  the harness killed it) — read whatever is in `$TMPOUT`/`$TMPERR` before
+  deciding to retry.
+- Only if the process is still `RUNNING`, the output files have not grown for
+  10+ minutes, AND no exit marker exists, treat it as stalled: kill it, then
+  retry once.
+
+### One run at a time
+
+Never start a Codex review, challenge, or consult while one you launched is
+still in flight — a second run doubles the load, races on the diff, and makes
+it unclear which output to trust. Before every launch:
+
+```bash
+_LIST="${TMPDIR:-/tmp}/codex-skill-runs-$PPID.list"
+if [ -f "$_LIST" ]; then
+  while read -r _prev; do
+    [ -f "$_prev.exit" ] && continue
+    [ -f "$_prev.pid" ] && kill -0 "$(cat "$_prev.pid")" 2>/dev/null && echo "IN_FLIGHT: $_prev"
+  done < "$_LIST"
+fi
+```
+
+- If it prints `IN_FLIGHT`, do not launch. Wait for that run (using the status
+  check above), read and present its output, and only then start the new one.
+  Tell the user why you're waiting.
+- Only runs recorded in this session's list count. Other Codex processes on the
+  machine (other sessions, other tasks) are not yours — never `pgrep codex`,
+  never kill or wait on a process that isn't in the list.
+- If `$PPID` is not stable across your Bash calls in this harness, fall back to
+  a fixed per-repo path: `"$(git rev-parse --show-toplevel)/.context/codex-runs.list"`
+  (`.context/` is gitignored, see Consult mode).
 
 After any run, check the exit code:
 
@@ -128,7 +168,8 @@ After any run, check the exit code:
 - If `$TMPERR` matches `auth|login|unauthorized`, tell the user: "Codex
   authentication failed. Run `codex login` to authenticate."
 
-Clean up temp files at the end.
+Clean up temp files at the end (`$TMPOUT`, `$TMPERR`, and their `.pid`/`.exit`
+markers) and drop the line from the runs list.
 
 ---
 
@@ -145,8 +186,8 @@ together — put the diff scope in the prompt instead of passing `--base`.
 cd "$(git rev-parse --show-toplevel)"
 _codex_timeout 1200 codex review "<filesystem boundary>
 
-Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review only those changes." -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null >"$TMPOUT" 2>"$TMPERR"
-_CODEX_EXIT=$?
+Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review only those changes." -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null >"$TMPOUT" 2>"$TMPERR" &
+echo $! > "$TMPOUT.pid"; wait $!; _CODEX_EXIT=$?; echo "EXIT:$_CODEX_EXIT" > "$TMPOUT.exit"
 ```
 
 **Custom-instructions path (`/codex review <focus>`):** use `codex exec` with the
@@ -165,12 +206,12 @@ _PROMPT_FILE=$(mktemp -t codex-prompt)
   git diff "origin/<base>...HEAD" 2>/dev/null || git diff "<base>...HEAD"
   printf '\nDIFF_END\n'
 } > "$_PROMPT_FILE"
-_codex_timeout 1200 codex exec -s read-only "$(cat "$_PROMPT_FILE")" -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null >"$TMPOUT" 2>"$TMPERR"
-_CODEX_EXIT=$?
+_codex_timeout 1200 codex exec -s read-only "$(cat "$_PROMPT_FILE")" -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null >"$TMPOUT" 2>"$TMPERR" &
+echo $! > "$TMPOUT.pid"; wait $!; _CODEX_EXIT=$?; echo "EXIT:$_CODEX_EXIT" > "$TMPOUT.exit"
 rm -f "$_PROMPT_FILE"
 ```
 
-Run with `run_in_background: true` (see "Run in the background" above) so the harness cannot kill the run; check the exit-marker file for completion.
+Run the one-run-at-a-time check first, then launch with `run_in_background: true` (see "Run in the background" above) so the harness cannot kill the run; track it via the `.pid`/`.exit` markers.
 
 Then:
 
@@ -230,8 +271,11 @@ failure modes a normal review misses.
    attacker could exploit this code: injection vectors, auth bypasses, privilege
    escalation, data exposure, timing attacks.").
 
-2. Run `codex exec` with **JSONL output** to capture reasoning traces (Bash
-   `run_in_background: true` per the background-run rules above):
+2. Run the one-run-at-a-time check, then run `codex exec` with **JSONL output**
+   to capture reasoning traces (Bash `run_in_background: true` per the
+   background-run rules above; wrap the whole pipeline in
+   `{ ...; exit "${PIPESTATUS[0]}"; } &`, record `$!` to `$TMPOUT.pid`, then
+   `wait` and write `$TMPOUT.exit`):
 
 ```bash
 _REPO_ROOT=$(git rev-parse --show-toplevel)
@@ -311,8 +355,10 @@ Ask Codex anything about the codebase, with session continuity for follow-ups.
 
    For free-form questions, just prepend the filesystem boundary to the question.
 
-3. Run with the same JSONL streaming parser as Challenge mode (Bash
-   `run_in_background: true` per the background-run rules above), but `model_reasoning_effort="medium"`.
+3. Run the one-run-at-a-time check, then run with the same JSONL streaming
+   parser as Challenge mode (Bash `run_in_background: true` per the
+   background-run rules above, same `.pid`/`.exit` markers), but
+   `model_reasoning_effort="medium"`.
 
    New session:
 
@@ -352,6 +398,9 @@ Ask Codex anything about the codebase, with session continuity for follow-ups.
 ## Important rules
 
 - **Never modify files.** This skill is read-only; Codex runs with `-s read-only`.
+- **One run at a time, tracked by PID.** Never launch while one of your runs is
+  in flight; never touch Codex processes you didn't launch; check progress via
+  the process and output file, never by blind waiting.
 - **No tests/lint/typecheck.** Codex must never run the test suite, linter, or
   type checker — the caller has already run them; re-running just burns time.
   The prompt boundary above enforces this; keep it in every prompt.
