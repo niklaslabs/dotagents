@@ -58,11 +58,11 @@ Parse the user's input:
 
 **Reasoning effort override:** if the input contains `--xhigh` anywhere, remove it
 from the prompt text and use `model_reasoning_effort="xhigh"` for the run.
-Otherwise use the per-mode defaults: Review `high`, Challenge `high`, Consult
-`medium`. (`xhigh` uses ~20x more tokens than `high` and can hang for 50+ minutes
-on large-context tasks — only on explicit request.)
+Otherwise use `medium` for every mode (Review, Challenge, Consult). If the input
+contains `--high`, use `high` instead. (`xhigh` uses ~20x more tokens than `high`
+and can hang for 50+ minutes on large-context tasks — only on explicit request.)
 
-**Model:** every invocation pins `-c 'model="gpt-5.6-sol"'` (the frontier
+**Model:** every invocation pins `-c 'model="gpt-6-astra"'` (the frontier
 agentic coding model) so results don't depend on `~/.codex/config.toml`. If the
 user passes `-m <model>`, replace that value — always via `-c model="..."`, since
 `codex review` has no `-m` flag (only `codex exec` does).
@@ -86,50 +86,97 @@ Codex output can be long, and truncating it silently drops findings. Always:
 - After the run, **Read `$TMPOUT` in full with the Read tool** — never `tail`,
   `head`, or rely on truncated Bash output.
 - Always run codex with `< /dev/null` (older CLI versions deadlock waiting on stdin).
+- File names must be unique per run. Other Claude sessions write into the same
+  `$TMPDIR`; a fixed name like `/tmp/codex-out.txt`, or a "newest `codex-out.*`"
+  watcher, will read a foreign session's verdict as yours.
 
 Shared setup for every mode:
 
 ```bash
-_codex_timeout() { local t=$1; shift; if command -v timeout >/dev/null 2>&1; then timeout "$t" "$@"; elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$t" "$@"; else "$@"; fi; }
-TMPOUT=$(mktemp -t codex-out)
-TMPERR=$(mktemp -t codex-err)
+# Unique per run. mktemp -t already appends a random suffix; the PID prefix makes
+# the owning session obvious in `ls`, and keeps parallel sessions from colliding.
+TMPOUT=$(mktemp -t "codex-$$-out")
+TMPERR=$(mktemp -t "codex-$$-err")
 echo "$TMPOUT" >> "${TMPDIR:-/tmp}/codex-skill-runs-$PPID.list"   # this session's runs (see "One run at a time")
 ```
 
-## Run in the background — never kill a working codex
+**No `timeout` wrapper.** Neither `timeout` nor `gtimeout` exists on this Mac
+(no coreutils). Do not write `timeout 1200 codex …` — it fails with "No such
+file or directory" and looks like a codex failure. The watchdog below replaces
+it in pure bash.
+
+**No `--enable` flags.** `--enable web_search_cached` is deprecated; current CLI
+versions reject it (exit 127) or block on it. Leave it off every invocation.
+
+## Busy check — `pgrep -x codex`, never `pgrep -f`
+
+```bash
+pgrep -x codex >/dev/null 2>&1 && echo BUSY || echo FREE
+```
+
+- `-x` matches the **exact process name** `codex` and nothing else.
+- **Never `pgrep -f 'codex exec'` in a wait loop.** `-f` matches the full command
+  line, which includes the polling shell's *own* command line (the loop script
+  contains the literal string `codex exec`), and it also matches any other Claude
+  session running the same loop. Two sessions then each see a "running codex"
+  that is only the other's `pgrep`, and both wait forever. This cost 20+ minutes
+  on 2026-08-29 with no codex process alive on the machine at any point.
+- Plain `pgrep codex` (no flag) also matches the ChatGPT desktop app's helper
+  processes. `-x` is the only safe form.
+- A busy check is advisory across sessions: another session's codex is not yours
+  to kill or wait on indefinitely. Wait at most a few minutes, then say so and
+  proceed or ask.
+
+## Canonical launch — background, PID-tracked, watchdog
 
 Codex runs MUST NOT be killed by the harness's foreground Bash timeout and then
-restarted from scratch — restarts throw away minutes of work. Always:
+restarted from scratch — restarts throw away minutes of work. `codex exec` with
+`gpt-6-astra` on a large diff routinely exceeds the Bash tool's **600000 ms (10
+minute) maximum**, so a foreground run is not an option: launch it detached and
+poll.
 
-- Give every codex invocation a generous outer timeout: **minimum 20 minutes**
-  (`_codex_timeout 1200`), regardless of mode. The old per-mode 330/570s values
-  are too tight for large diffs.
-- Launch the Bash call with `run_in_background: true`. The command keeps running
-  across turns and you are re-invoked when it exits — no foreground cap applies.
-  Background the codex process inside the call so its PID is recorded, then
-  `wait` on it and write the exit code to a marker file so completion is
-  unambiguous:
-  ```bash
-  _codex_timeout 1200 codex ... < /dev/null >"$TMPOUT" 2>"$TMPERR" &
-  echo $! > "$TMPOUT.pid"; wait $!; echo "EXIT:$?" > "$TMPOUT.exit"
-  ```
-  (For the JSONL-piped modes, background the whole pipeline as a group that
-  ends with `exit "${PIPESTATUS[0]}"` so `wait` returns codex's status, not the
-  parser's: `{ codex ... | parser >"$TMPOUT"; exit "${PIPESTATUS[0]}"; } &`.)
-- While waiting, track the run through its process and output file — never wait
-  blind. Roughly once a minute, run the status check below and report one line
-  ("codex still reviewing, output growing"). Do not busy-poll faster than that,
-  and never restart a run whose output is still growing.
-  ```bash
-  [ -f "$TMPOUT.exit" ] && cat "$TMPOUT.exit" || { kill -0 "$(cat "$TMPOUT.pid")" 2>/dev/null && echo RUNNING || echo GONE; }
-  wc -c "$TMPOUT" "$TMPERR"
-  ```
-  `GONE` with no exit marker means the process died without writing one (e.g.
-  the harness killed it) — read whatever is in `$TMPOUT`/`$TMPERR` before
-  deciding to retry.
-- Only if the process is still `RUNNING`, the output files have not grown for
-  10+ minutes, AND no exit marker exists, treat it as stalled: kill it, then
-  retry once.
+**Launch (one Bash call, returns immediately):**
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+codex exec -s read-only "<prompt>" -c 'model="gpt-6-astra"' -c 'model_reasoning_effort="medium"' \
+  < /dev/null > "$TMPOUT" 2> "$TMPERR" &
+CODEX_PID=$!
+echo "$CODEX_PID" > "$TMPOUT.pid"
+date +%s > "$TMPOUT.start"
+echo "LAUNCHED pid=$CODEX_PID out=$TMPOUT"
+```
+
+Record `$TMPOUT`, `$TMPERR` and the PID in your notes — every later Bash call is
+a fresh shell and will not have those variables.
+
+**Poll (repeat; each call stays well under the 10-minute Bash cap):**
+
+```bash
+OUT=<the recorded $TMPOUT>; PID=$(cat "$OUT.pid")
+DEADLINE=$(( $(date +%s) + 480 ))          # 8 min of waiting, < the 600 s Bash cap
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  kill -0 "$PID" 2>/dev/null || { echo "EXITED"; break; }
+  sleep 15
+done
+ELAPSED=$(( $(date +%s) - $(cat "$OUT.start") ))
+if kill -0 "$PID" 2>/dev/null; then echo "RUNNING ${ELAPSED}s"; else echo "DONE ${ELAPSED}s"; fi
+wc -c "$OUT"                                # growing output = healthy, not stalled
+```
+
+Set the Bash `timeout` parameter to **540000 ms (9 min)** on such a call — under
+the 600000 ms hard max, above the 480 s loop, so the loop always finishes first.
+
+- Report one line per poll: `codex running 6m12s, output 14 KB and growing`.
+  Never poll faster than every ~15 s inside the loop, and never launch a second
+  run to "check" on the first.
+- **Watchdog.** If `$TMPOUT` + `$TMPERR` have not grown across two consecutive
+  poll rounds AND elapsed time exceeds **25 minutes**, treat the run as stalled:
+  `kill "$PID"` (then `kill -9` after 5 s if it survives), read whatever landed
+  in `$TMPOUT`/`$TMPERR`, report it, and retry at most once. Output that is
+  still growing is never stalled, however long it has been running.
+- If `kill -0` says gone but `$TMPOUT` is empty, the process died without
+  producing anything — read `$TMPERR` before concluding anything about the model.
 
 ### One run at a time
 
@@ -141,37 +188,53 @@ it unclear which output to trust. Before every launch:
 _LIST="${TMPDIR:-/tmp}/codex-skill-runs-$PPID.list"
 if [ -f "$_LIST" ]; then
   while read -r _prev; do
-    [ -f "$_prev.exit" ] && continue
     [ -f "$_prev.pid" ] && kill -0 "$(cat "$_prev.pid")" 2>/dev/null && echo "IN_FLIGHT: $_prev"
   done < "$_LIST"
 fi
+pgrep -x codex >/dev/null 2>&1 && echo "SOME_CODEX_RUNNING (may be another session)"
 ```
 
-- If it prints `IN_FLIGHT`, do not launch. Wait for that run (using the status
-  check above), read and present its output, and only then start the new one.
-  Tell the user why you're waiting.
-- Only runs recorded in this session's list count. Other Codex processes on the
-  machine (other sessions, other tasks) are not yours — never `pgrep codex`,
-  never kill or wait on a process that isn't in the list.
+- If it prints `IN_FLIGHT`, do not launch. Wait for that run (using the poll
+  above), read and present its output, and only then start the new one. Tell the
+  user why you're waiting.
+- `SOME_CODEX_RUNNING` without `IN_FLIGHT` means the process belongs to another
+  session. Never kill it and never wait on it open-endedly — wait a few minutes
+  at most, then report and proceed.
 - If `$PPID` is not stable across your Bash calls in this harness, fall back to
   a fixed per-repo path: `"$(git rev-parse --show-toplevel)/.context/codex-runs.list"`
   (`.context/` is gitignored, see Consult mode).
 
-After any run, check the exit code:
+## On completion — what to do the moment the run ends
 
-- `124` — codex hit the outer timeout (rare with the 20-minute floor). Before
-  restarting, check whether `$TMPOUT` already contains complete-looking findings.
-  Tell the user: "Codex stalled. Common causes: model API stall, long prompt,
-  network issue. Try re-running, or split the prompt."
-- other non-zero — surface it; don't misread "no output" as a model stall:
-  ```bash
-  echo "[codex exit $_CODEX_EXIT]"; head -20 "$TMPERR"
-  ```
-- If `$TMPERR` matches `auth|login|unauthorized`, tell the user: "Codex
-  authentication failed. Run `codex login` to authenticate."
+The instant `kill -0` reports the process gone (or your wrapper subagent
+returns), do all of this in the **same turn**:
 
-Clean up temp files at the end (`$TMPOUT`, `$TMPERR`, and their `.pid`/`.exit`
-markers) and drop the line from the runs list.
+1. **Read `$TMPOUT` in full** with the Read tool. Never tail/head it.
+2. **Check the exit path.** Empty `$TMPOUT` → read `$TMPERR` (`head -20`). If
+   `$TMPERR` matches `auth|login|unauthorized`, tell the user: "Codex
+   authentication failed. Run `codex login`." If it matches `unexpected
+   argument|unknown option`, you passed a flag this CLI version rejects (e.g.
+   `--enable web_search_cached`) — drop it and relaunch.
+3. **Condense.** Present the findings verbatim per the mode's format, then the
+   gate verdict, then the one-line synthesis recommendation.
+4. **Act on it.** A returned review is a **trigger for the next pipeline step,
+   never a stopping point.** If you are orchestrating: fix the P1s, or launch
+   the next gate (commit / PR / merge), in the same turn you receive the result.
+   Answering a completed Codex review with an acknowledgement — and in
+   particular with "No response requested." — is the documented failure mode
+   here; it stalls the pipeline silently until the user notices.
+5. **Clean up** `$TMPOUT`, `$TMPERR`, `.pid`, `.start`, and drop the line from
+   the runs list.
+
+### Briefing a wrapper subagent
+
+When a Haiku/Sonnet subagent runs Codex on your behalf, its brief must contain,
+verbatim: the `pgrep -x codex` busy check (with "do NOT use `pgrep -f`"), the
+launch snippet above, "no `timeout` wrapper — it does not exist on this Mac",
+"no `--enable` flags", the 9-minute poll cap, and the instruction to send the
+orchestrator a progress ping every 2–3 minutes carrying **the PID and elapsed
+time** (`codex pid 41233, 7m40s, output growing`). The wrapper's final report
+must be the condensed findings plus the gate verdict — not a file path.
 
 ---
 
@@ -186,10 +249,10 @@ together — put the diff scope in the prompt instead of passing `--base`.
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-_codex_timeout 1200 codex review "<filesystem boundary>
+codex review "<filesystem boundary>
 
-Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review only those changes." -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null >"$TMPOUT" 2>"$TMPERR" &
-echo $! > "$TMPOUT.pid"; wait $!; _CODEX_EXIT=$?; echo "EXIT:$_CODEX_EXIT" > "$TMPOUT.exit"
+Review the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review only those changes." -c 'model="gpt-6-astra"' -c 'model_reasoning_effort="medium"' < /dev/null >"$TMPOUT" 2>"$TMPERR" &
+CODEX_PID=$!; echo "$CODEX_PID" > "$TMPOUT.pid"; date +%s > "$TMPOUT.start"; echo "LAUNCHED pid=$CODEX_PID out=$TMPOUT"
 ```
 
 **Custom-instructions path (`/codex review <focus>`):** use `codex exec` with the
@@ -208,12 +271,14 @@ _PROMPT_FILE=$(mktemp -t codex-prompt)
   git diff "origin/<base>...HEAD" 2>/dev/null || git diff "<base>...HEAD"
   printf '\nDIFF_END\n'
 } > "$_PROMPT_FILE"
-_codex_timeout 1200 codex exec -s read-only "$(cat "$_PROMPT_FILE")" -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null >"$TMPOUT" 2>"$TMPERR" &
-echo $! > "$TMPOUT.pid"; wait $!; _CODEX_EXIT=$?; echo "EXIT:$_CODEX_EXIT" > "$TMPOUT.exit"
+codex exec -s read-only "$(cat "$_PROMPT_FILE")" -c 'model="gpt-6-astra"' -c 'model_reasoning_effort="medium"' < /dev/null >"$TMPOUT" 2>"$TMPERR" &
+CODEX_PID=$!; echo "$CODEX_PID" > "$TMPOUT.pid"; date +%s > "$TMPOUT.start"; echo "LAUNCHED pid=$CODEX_PID out=$TMPOUT"
 rm -f "$_PROMPT_FILE"
 ```
 
-Run the one-run-at-a-time check first, then launch with `run_in_background: true` (see "Run in the background" above) so the harness cannot kill the run; track it via the `.pid`/`.exit` markers.
+Run the one-run-at-a-time check first, then launch exactly as in "Canonical
+launch" above (backgrounded with `&`, PID recorded) so the harness's 10-minute
+Bash cap cannot kill the run, and poll it with the 8-minute `kill -0` loop.
 
 Then:
 
@@ -274,15 +339,15 @@ failure modes a normal review misses.
    escalation, data exposure, timing attacks.").
 
 2. Run the one-run-at-a-time check, then run `codex exec` with **JSONL output**
-   to capture reasoning traces (Bash `run_in_background: true` per the
-   background-run rules above; wrap the whole pipeline in
-   `{ ...; exit "${PIPESTATUS[0]}"; } &`, record `$!` to `$TMPOUT.pid`, then
-   `wait` and write `$TMPOUT.exit`):
+   to capture reasoning traces. Background the whole pipeline as a group so the
+   recorded PID owns both codex and the parser:
+   `{ codex … | parser >"$TMPOUT"; } & CODEX_PID=$!; echo "$CODEX_PID" > "$TMPOUT.pid"; date +%s > "$TMPOUT.start"`.
+   Then poll with the `kill -0` loop; do not `wait` in the foreground.
 
 ```bash
 _REPO_ROOT=$(git rev-parse --show-toplevel)
 PYTHON_CMD=$(command -v python3 || command -v python)
-_codex_timeout 1200 codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="high"' --enable web_search_cached --json < /dev/null 2>"$TMPERR" | PYTHONUNBUFFERED=1 "$PYTHON_CMD" -u -c "
+codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model="gpt-6-astra"' -c 'model_reasoning_effort="medium"' --json < /dev/null 2>"$TMPERR" | PYTHONUNBUFFERED=1 "$PYTHON_CMD" -u -c "
 import sys, json
 turns = 0
 for line in sys.stdin:
@@ -314,7 +379,6 @@ for line in sys.stdin:
 if turns == 0:
     print('[codex warning] No turn.completed event — possible mid-stream disconnect.', file=sys.stderr)
 " >"$TMPOUT"
-_CODEX_EXIT=${PIPESTATUS[0]}
 ```
 
 3. Read `$TMPOUT` in full and present it verbatim in a `CODEX SAYS (adversarial
@@ -358,20 +422,19 @@ Ask Codex anything about the codebase, with session continuity for follow-ups.
    For free-form questions, just prepend the filesystem boundary to the question.
 
 3. Run the one-run-at-a-time check, then run with the same JSONL streaming
-   parser as Challenge mode (Bash `run_in_background: true` per the
-   background-run rules above, same `.pid`/`.exit` markers), but
-   `model_reasoning_effort="medium"`.
+   parser as Challenge mode (same backgrounded-group launch and `kill -0`
+   polling), but `model_reasoning_effort="medium"`.
 
    New session:
 
    ```bash
-   _codex_timeout 1200 codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="medium"' --enable web_search_cached --json < /dev/null 2>"$TMPERR" | ... >"$TMPOUT"
+   codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model="gpt-6-astra"' -c 'model_reasoning_effort="medium"' --json < /dev/null 2>"$TMPERR" | ... >"$TMPOUT"
    ```
 
    Resumed session:
 
    ```bash
-   _codex_timeout 1200 codex exec resume <session-id> "<prompt>" -c 'sandbox_mode="read-only"' -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="medium"' --enable web_search_cached --json < /dev/null 2>"$TMPERR" | ... >"$TMPOUT"
+   codex exec resume <session-id> "<prompt>" -c 'sandbox_mode="read-only"' -c 'model="gpt-6-astra"' -c 'model_reasoning_effort="medium"' --json < /dev/null 2>"$TMPERR" | ... >"$TMPOUT"
    ```
 
    If resume fails, delete the session file and start fresh.
@@ -402,7 +465,12 @@ Ask Codex anything about the codebase, with session continuity for follow-ups.
 - **Never modify files.** This skill is read-only; Codex runs with `-s read-only`.
 - **One run at a time, tracked by PID.** Never launch while one of your runs is
   in flight; never touch Codex processes you didn't launch; check progress via
-  the process and output file, never by blind waiting.
+  `kill -0 $PID` and the output file size, never by blind waiting.
+- **Busy-check with `pgrep -x codex` only.** `pgrep -f 'codex exec'` matches the
+  polling shell itself and other sessions' polling shells — it deadlocks.
+- **A finished review is a trigger, not an ending.** Read it, condense it, and
+  fire the next pipeline step in the same turn. Never answer a completed Codex
+  run with "No response requested."
 - **No tests/lint/typecheck.** Codex must never run the test suite, linter, or
   type checker — the caller has already run them; re-running just burns time.
   The prompt boundary above enforces this; keep it in every prompt.
