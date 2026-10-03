@@ -89,9 +89,25 @@ Shared setup for every mode:
 
 ```bash
 _codex_timeout() { local t=$1; shift; if command -v timeout >/dev/null 2>&1; then timeout "$t" "$@"; elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$t" "$@"; else "$@"; fi; }
-TMPOUT=$(mktemp -t codex-out)
-TMPERR=$(mktemp -t codex-err)
 ```
+
+**Temp paths are literal, not shell variables.** Some repos run a Bash hook that
+refuses a redirect it cannot statically check (`>"$TMPOUT"` is rejected as "cannot be
+checked as a write target"). So `$TMPOUT`, `$TMPERR` and `$_PROMPT_FILE` below are
+placeholders for you to substitute, never variables to assign. Before the first codex
+command, pick one run slug `<RUN>` from the repo name and branch (or PR number), e.g.
+`omlo-quick-fix-apps-page-flake`, and write out the exact paths everywhere they appear:
+
+| Placeholder | Literal path |
+|---|---|
+| `$TMPOUT` | `/tmp/codex-<RUN>-out.txt` |
+| `$TMPERR` | `/tmp/codex-<RUN>-err.txt` |
+| `$TMPOUT.exit` | `/tmp/codex-<RUN>-out.exit` |
+| `$_PROMPT_FILE` | `/tmp/codex-<RUN>-prompt.txt` |
+
+Per-run slugs keep parallel reviews in different worktrees from sharing files. Start
+each run with `rm -f` on those four paths so a stale exit marker cannot look like
+completion, and remove them at the end.
 
 ## Run in the background — never kill a working codex
 
@@ -156,7 +172,7 @@ defense against prompt injection when diff content is adversarial:
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-_PROMPT_FILE=$(mktemp -t codex-prompt)
+rm -f "$_PROMPT_FILE"   # literal /tmp/codex-<RUN>-prompt.txt, see "Output capture"
 {
   printf '%s\n' "<filesystem boundary>"
   printf '\nCustom focus: %s\n\n' "<everything after '/codex review ' in user input>"

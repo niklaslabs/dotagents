@@ -1,11 +1,11 @@
 {
-  "model": "claude-fable-5[1m]",
+  "model": "opus[1m]",
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": true
   },
   "effortLevel": "medium",
   "tui": "fullscreen",
   "skipWorkflowUsageWarning": true,
-  "agentPushNotifEnabled": true,
-  "skipAutoPermissionPrompt": true
+  "theme": "dark",
+  "agentPushNotifEnabled": true
 }
