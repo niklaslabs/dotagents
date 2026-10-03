@@ -4,6 +4,7 @@ My config for AI coding agents — vendor-neutral skills plus per-tool settings.
 
 ```
 skills/            SKILL.md skills (open Agent Skills format): codex, unslop
+exclude for now/   parked skills, not linked: delegate, ship, ship-local, plan-html, pr-image
 claude/            Claude Code: CLAUDE.md (global), settings.json
 link.sh            links the above into every Claude config dir
 claude-dirs.local  list of Claude config dirs to link into (gitignored)
@@ -32,3 +33,5 @@ Third-party skills go in `skills/vendor/<name>/`; delete a folder to disable.
 - plan-html (self-written)
 - delegate (self-written)
 - ship (self-written)
+- ship-local (self-written)
+- pr-image (self-written; endpoint per https://island94.org/2026/08/programmatically-upload-attachments-to-github-issues-pull-requests-comments)
