@@ -11,7 +11,11 @@ description: Orchestrate work via subagents and pick the right model tier. Use w
 - An Opus orchestrator may consult Fable (or Codex) on genuinely hard calls; discuss, then let Opus execute.
 - Spawn independent subagents in parallel with tight briefs; require a short summary back, never file dumps.
 - Always review worker output yourself — cheaper workers make compounding errors.
-- Big Codex review/work: wrap it in a Haiku or Sonnet subagent that starts the Codex run and forwards the result.
+- Big Codex review/work: wrap it in a Haiku or Sonnet subagent that starts the Codex run and forwards the result. The brief must paste the canonical launch snippet from the `codex` skill ("Canonical launch — background, PID-tracked, watchdog") verbatim, plus these four lines, because a wrapper that improvises here is where the pipeline stalls:
+  - Busy-check with `pgrep -x codex` **only**. `pgrep -f 'codex exec'` matches the polling shell's own command line and other sessions' polling shells — two sessions then wait on each other with no codex running (20+ min lost, 2026-08-29).
+  - No `timeout` / `gtimeout` wrapper — neither is installed on this Mac; a `timeout 1200 codex …` line fails silently and looks like a codex failure.
+  - Launch backgrounded with the literal `/tmp/codex-<RUN>-…` output paths from the `codex` skill (no `mktemp`, no shell variables), record the PID, and poll `kill -0 $PID` in ≤8-minute loops with the Bash `timeout` set to 540000 ms. `codex exec` on a large diff regularly outruns the Bash tool's 600000 ms maximum, so a foreground run cannot work.
+  - Progress pings every 2–3 minutes must carry **the PID and elapsed time** (`codex pid 41233, 7m40s, output growing`), so you can tell "still thinking" from "hung" without asking. The final report is condensed findings + gate verdict, not a file path.
 - Post a status update every 2–3 minutes while agents run.
 - Thinking level medium everywhere unless clearly needed.
 
@@ -19,6 +23,7 @@ description: Orchestrate work via subagents and pick the right model tier. Use w
 - Every brief tells the subagent to send the orchestrator a 1–3 line progress message every 2–3 minutes (SendMessage to the parent; done/blocked/next). This is how you catch drift early and redirect — waiting for the final report is too late.
 - Keep a written next-step list (what's running, what each result unblocks, what's still pending). Update it whenever an agent starts or finishes. This is the pipeline; the transcript is not.
 - Every agent notification — progress or completion — is a trigger, not news. On each one: (1) read the result, (2) check the next-step list for anything it unblocks, (3) launch it, (4) redirect the agent if it's drifting. Only then acknowledge.
+- **A completion notification is answered with an action, never with "No response requested."** That phrase is banned as a reply to any agent completion. If you genuinely believe nothing is unblocked, say what the pipeline is now waiting on and who is running — an empty acknowledgement is how a stall hides. A returned Codex review in particular is a trigger: fix the P1s or fire the next gate in the same turn.
 - If no subagents are running and the task isn't done, you are the bottleneck. Launch the next step or finish it yourself. Never end a turn on "waiting" when nothing is left to wait for.
 - Failure mode to watch for: after a long run of acknowledge-and-wait turns, the completion that actually unblocks the next step gets pattern-matched as another status ping. The next-step list is the guard — consult it before replying, every time.
 

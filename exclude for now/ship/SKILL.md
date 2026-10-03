@@ -16,7 +16,7 @@ Run the gates in order. Before each, ask: **already done on the exact current wo
 0. **Branch** — if on the default branch, create a feature branch first.
 1. **Lint + format** — run the repo's lint and format commands (check package.json / Makefile / AGENTS.md). Fix issues.
 2. **Tests** — full local suite must pass on the current tree. Fix, don't skip.
-3. **Codex review** — run `/codex review` on the diff. Address findings; re-review if code changed. A failed review blocks shipping unless the user passed `--force`.
+3. **Codex review** — run `/codex review` on the diff (see the codex skill for the backgrounded launch and `pgrep -x codex` busy check; a run can exceed the 10-minute Bash cap, so never run it in the foreground). Address findings; re-review if code changed. A failed review blocks shipping unless the user passed `--force`. When the review returns, move straight to the next gate in the same turn — a returned review is a trigger, not a stopping point.
 4. **Commit** — commit everything. Check the repo's AGENTS.md / CLAUDE.md for commit-message rules (e.g. no AI trailers) before writing the message.
 5. **PR** — `git push -u` and `gh pr create` with a concise title/body.
 6. **Auto-merge** — `gh pr merge --auto --merge` by default (merge commit). Use `--squash` for small changes: one or two commits, or a trivial fix where the history adds nothing. A repo convention (CLAUDE.md / AGENTS.md / branch protection allowing only one method) overrides both. Watch CI briefly; report the PR URL and status.
